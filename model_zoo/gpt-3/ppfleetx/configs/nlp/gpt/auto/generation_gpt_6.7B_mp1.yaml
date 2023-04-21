@@ -22,7 +22,7 @@ Generation:
   max_dec_len: 8
   num_return_sequences: 1
   decode_strategy: "sampling"
-  early_finish: True
+  early_finish: False
 
 
 Model:
