@@ -1003,17 +1003,11 @@ class FusedMultiTransformerBase(Layer):
             key[..., : self.config.mla_config.qk_nope_head_dim] = key_nope
             key[..., self.config.mla_config.qk_nope_head_dim :] = key_pe
 
-            # query = paddle.nn.functional.pad(query, [0, 192 - self.config.mla_config.qk_head_dim], value=0)
-            # key = paddle.nn.functional.pad(key, [0, 192 - self.config.mla_config.qk_head_dim], value=0)
-            value = paddle.nn.functional.pad(
-                value, [0, self.config.mla_config.qk_head_dim - self.config.mla_config.v_head_dim], value=0
-            )
-
             qkv_out = paddle.concat(
                 [
                     query.reshape([-1, self.num_heads * self.config.mla_config.qk_head_dim]),
                     key.reshape([-1, self.num_heads * self.config.mla_config.qk_head_dim]),
-                    value.reshape([-1, self.num_heads * self.config.mla_config.qk_head_dim]),
+                    value.reshape([-1, self.num_heads * self.config.mla_config.v_head_dim]),
                 ],
                 axis=-1,
             )
@@ -2703,6 +2697,8 @@ class FusedBlockMultiTransformer(FusedMultiTransformerBase):
         **kwargs,
     ):
         if self.config.append_attn:
+            if self.config.mla_config.use_mla():
+                rotary_embs = None
             from paddlenlp_ops import append_attention
 
             fmha_out = append_attention(
@@ -2835,8 +2831,8 @@ class FusedBlockMultiTransformer(FusedMultiTransformerBase):
                 )[0]
 
         if self.config.mla_config.use_mla():
-            fmha_out = fmha_out.reshape([-1, self.num_heads, self.config.mla_config.qk_head_dim])
-            fmha_out = fmha_out[:, :, : self.config.mla_config.v_head_dim]
+            # fmha_out = fmha_out.reshape([-1, self.num_heads, self.config.mla_config.qk_head_dim])
+            # fmha_out = fmha_out[:, :, : self.config.mla_config.v_head_dim]
             fmha_out = fmha_out.reshape([-1, self.num_heads * self.config.mla_config.v_head_dim])
 
         out_linear_out = self.compute_out_linear(fmha_out, i)

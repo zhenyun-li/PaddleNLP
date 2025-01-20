@@ -619,6 +619,7 @@ __global__ void GQANeoxVariableLengthRotaryKernel(
   }
 }
 
+
 template <typename T, int VecSize = 1>
 __global__ void cache_kernel(
     const T *__restrict__ qkv,    // [num_tokens, num_heads + 2 * kv_num_heads,
@@ -634,7 +635,8 @@ __global__ void cache_kernel(
     const int max_seq_len,
     const int max_blocks_per_seq,
     const int num_heads,
-    const int head_size,
+    const int head_size_qk,
+    const int head_size_v,
     const int block_size,
     const uint32_t elem_cnt,
     const int kv_num_heads) {
@@ -642,41 +644,52 @@ __global__ void cache_kernel(
   LoadT src_vec;
 
   uint32_t global_thread_idx = blockDim.x * blockIdx.x + threadIdx.x;
-  const uint32_t hidden_size = kv_num_heads * head_size;
-  const uint32_t offset = 2 * hidden_size;
+  // const uint32_t hidden_size = kv_num_heads * head_size;
+  const uint32_t hidden_size_q = num_heads * head_size_qk;
+  const uint32_t hidden_size_k = kv_num_heads * head_size_qk;
+  const uint32_t hidden_size_v = kv_num_heads * head_size_v;
+  const uint32_t offset = hidden_size_k + hidden_size_v;
   for (uint32_t linear_index = global_thread_idx * VecSize,
                 step = gridDim.x * blockDim.x * VecSize;
        linear_index < elem_cnt;
        linear_index += step) {
     const uint32_t token_idx = linear_index / offset;
     const uint32_t bias = linear_index % offset;
-    const uint32_t qkv_id = bias / hidden_size;  // skip q
-    const uint32_t qkv_bias = bias % hidden_size;
-    const uint32_t hi = qkv_bias / head_size;
-    const uint32_t h_bias = qkv_bias % head_size;
     const uint32_t ori_token_idx = token_idx + padding_offsets[token_idx];
     const uint32_t ori_bi = ori_token_idx / max_seq_len;
     if (seq_lens[ori_bi] == 0) continue;
     const uint32_t ori_seq_id =
         ori_token_idx % max_seq_len + seq_lens_decoder[ori_bi];
-
     const int32_t *block_table_now = nullptr;
 
     block_table_now = block_tables + ori_bi * max_blocks_per_seq;
 
     const uint32_t block_idx = block_table_now[ori_seq_id / block_size];
     const uint32_t block_offset = ori_seq_id % block_size;
-
-    const uint32_t tgt_idx = block_idx * kv_num_heads * block_size * head_size +
-                             hi * block_size * head_size +
-                             block_offset * head_size + h_bias;
-    const uint32_t ori_idx =
-        token_idx * (num_heads + 2 * kv_num_heads) * head_size +
-        num_heads * head_size + qkv_id * hidden_size + hi * head_size + h_bias;
-    Load<T, VecSize>(&qkv[ori_idx], &src_vec);
-    if (qkv_id == 0) {
+    
+    if (bias < hidden_size_k) {
+      const uint32_t qkv_bias = bias;
+      const uint32_t hi = qkv_bias / head_size_qk;
+      const uint32_t h_bias = qkv_bias % head_size_qk;
+      const uint32_t tgt_idx = block_idx * kv_num_heads * block_size * head_size_qk +
+                             hi * block_size * head_size_qk +
+                             block_offset * head_size_qk + h_bias;
+      const uint32_t ori_idx =
+          token_idx * (hidden_size_q + hidden_size_k + hidden_size_v) +
+          hidden_size_q + qkv_bias;
+      Load<T, VecSize>(&qkv[ori_idx], &src_vec);
       Store<T, VecSize>(src_vec, &key_cache[tgt_idx]);
     } else {
+      const uint32_t qkv_bias = bias - hidden_size_k;
+      const uint32_t hi = qkv_bias / head_size_v;
+      const uint32_t h_bias = qkv_bias % head_size_v;
+      const uint32_t tgt_idx = block_idx * kv_num_heads * block_size * head_size_v +
+                             hi * block_size * head_size_v +
+                             block_offset * head_size_v + h_bias;
+      const uint32_t ori_idx =
+          token_idx * (hidden_size_q + hidden_size_k + hidden_size_v) +
+          hidden_size_q + hidden_size_k + qkv_bias;
+      Load<T, VecSize>(&qkv[ori_idx], &src_vec);
       Store<T, VecSize>(src_vec, &value_cache[tgt_idx]);
     }
   }
@@ -1460,11 +1473,12 @@ void CascadeAppendWriteCacheKVQKV(
   auto num_tokens = meta_data.token_nums;
   auto num_heads = meta_data.q_num_heads;
   auto kv_num_heads = meta_data.kv_num_heads;
-  auto head_dim = meta_data.head_dims;
+  auto head_dim_qk = meta_data.head_dims;
+  auto head_dim_v = meta_data.head_dims_v;
   auto block_size = meta_data.block_size;
 
   const uint32_t elem_nums =
-      num_tokens * 2 * kv_num_heads * head_dim;
+      num_tokens * kv_num_heads * (head_dim_qk + head_dim_v);
   constexpr int PackSize = 16 / sizeof(T);
   const int pack_num = elem_nums / PackSize;
   const int blocksize = 128;
@@ -1481,7 +1495,8 @@ void CascadeAppendWriteCacheKVQKV(
       max_seq_len,
       max_blocks_per_seq,
       num_heads,
-      head_dim,
+      head_dim_qk,
+      head_dim_v,
       block_size,
       elem_nums,
       kv_num_heads);
